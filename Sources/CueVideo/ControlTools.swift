@@ -85,7 +85,7 @@ enum ControlTools {
         tool("set_framing", "Change how a follow shot is framed, live, while Churchfront Video runs: takes effect on tracking cameras within a frame. All measured as a share of the frame. eye_line: where the eyes sit, down from the top (less = less headroom). size: eyes-to-shoulders drop against frame height (bigger = tighter). lead_room: offset toward where they face or walk. dead_x / dead_y: how far they can drift before the camera moves. reset: true returns this size to the standard.",
              ["shot": choice("Shot size.", ["shoulders", "waist", "full"]), "eye_line": num("0.1 to 0.5."), "size": num("Shoulders about 0.36, waist 0.21, full 0.095."),
               "lead_room": num("0 to 0.2."), "dead_x": num("0.02 to 0.2."), "dead_y": num("0.02 to 0.2."), "reset": bool("Back to the standard.")], required: ["shot"]),
-        tool("set_tracking_tuning", "Change how auto tracking responds, live. correction: pull toward the mark (default 1.2; higher reacts harder, too high wobbles). latency: seconds the preview runs behind (0.45). walk_threshold: speed in frames a second that counts as walking (0.12; higher ignores more small moves). zoom_threshold: how wrong the shot size must look before zooming (0.3, about a third). zoom_wait: seconds it must stay wrong first (1.5). speed: overall follow speed 0.5 to 4. reset: true returns all to defaults.",
+        tool("set_tracking_tuning", "Change how auto tracking responds, live. correction: pull toward the mark (default 1.2; higher reacts harder, too high wobbles). latency: seconds the preview runs behind (0.45). walk_threshold: speed in frames a second that counts as walking (0.12; higher ignores more small moves). zoom_threshold: how wrong the shot size must look before zooming (0.3, about a third). zoom_wait: seconds it must stay wrong first (1.5). ramp: about how many seconds the camera takes to gather speed or slow down (0.7; higher is smoother, lower reacts sooner; 0.2 to 2). speed: overall follow speed 0.5 to 4. reset: true returns all to defaults.",
              ["correction": num("0.4 to 2.5."), "latency": num("0.2 to 0.8."), "walk_threshold": num("0.05 to 0.4."), "zoom_threshold": num("0.1 to 0.8."),
               "zoom_wait": num("0.5 to 5."), "speed": num("0.5 to 4."), "reset": bool("Back to defaults.")]),
         tool("set_tracking_shot", "Reframe a tracking camera as a different follow shot: shoulders up, waist up or full length.",
@@ -341,6 +341,7 @@ enum ControlTools {
                 if let v = clamp(a["walk_threshold"], 0.05, 0.4) { c.trackTuning.walkThreshold = v }
                 if let v = clamp(a["zoom_threshold"], 0.1, 0.8) { c.trackTuning.zoomThreshold = v }
                 if let v = clamp(a["zoom_wait"], 0.5, 5) { c.trackTuning.zoomWait = v }
+                if let v = clamp(a["ramp"], 0.2, 2) { c.trackTuning.ramp = v }
                 if let v = clamp(a["speed"], 0.5, 4) { c.trackSpeed = v }
             }
             done(ok("Tracking tuning updated", framingReport()))
@@ -639,7 +640,7 @@ enum ControlTools {
         return ["framing": shots, "tracking": [
             "speed": store.config.trackSpeed, "tilt": store.config.trackTilt, "zoom_to_hold_size": store.config.trackZoom,
             "correction": t.correction ?? 1.2, "latency": t.latency ?? 0.45, "walk_threshold": t.walkThreshold ?? 0.12,
-            "zoom_threshold": t.zoomThreshold ?? 0.3, "zoom_wait": t.zoomWait ?? 1.5] as [String: Any]]
+            "zoom_threshold": t.zoomThreshold ?? 0.3, "zoom_wait": t.zoomWait ?? 1.5, "ramp": t.ramp ?? 0.7] as [String: Any]]
     }
 
     static func routing() -> [String: Any] {

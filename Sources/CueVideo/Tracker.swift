@@ -76,6 +76,9 @@ struct TrackedPerson {
     var core: CGRect
     /// Between the eyes (or the nose, or the ears).
     var eye: CGPoint
+    /// The middle of their body, across: between the shoulders and between the hips. Nil when
+    /// neither pair shows. Arms never move it, and nor does a nod or a lean of the head.
+    var trunkX: CGFloat?
     /// Eyes to shoulders, as a share of frame height. Nil when the body landmarks aren't clear.
     var scale: Double?
     var hipsInShot = false
@@ -91,6 +94,8 @@ struct TrackedPerson {
     var outline = false
 
     var size: ShotSize? { ShotSize.classify(scale: scale, anklesInShot: anklesInShot, hipsInShot: hipsInShot) }
+    /// Where the camera aims across: the middle of their body, or their head when that's all there is.
+    var aimX: CGFloat { trunkX ?? eye.x }
 }
 
 /// Auto tracking: a camera follows one person around the stage.
@@ -120,7 +125,8 @@ final class AutoTracker: ObservableObject {
         var seen: ShotSize?
         var pick: CGPoint?
         var people: [TrackedPerson] = []
-        var eye: CGPoint?          // smoothed
+        /// Smoothed: x is the middle of their body (aimX), y their eyes.
+        var eye: CGPoint?
         var scale: Double?         // smoothed
         var lead = 0.0             // smoothed lead-room offset
         var lastSeen = Date()
@@ -128,8 +134,8 @@ final class AutoTracker: ObservableObject {
         var lastFrame = Date()
         var manualZoomAt: Date?
         var panning = false, tilting = false, zooming = false
-        /// Pan and tilt last sent, in the camera's units (hundredths of a degree a second).
-        var sentPan = 0.0, sentTilt = 0.0, sentZoom = 0.0
+        /// Zoom last sent. Pan and tilt are in `motion`, eased between frames.
+        var sentZoom = 0.0
 
         // Motion, measured. The camera reports its angle of view, so moves are worked out in
         // real angles: how fast the person is really going, and how fast the camera really
@@ -137,8 +143,6 @@ final class AutoTracker: ObservableObject {
         var fov = 40.0                       // horizontal angle of view now, degrees
         var lastPos: (pan: Double, tilt: Double, at: Date)?
         var gainPan = 1.0, gainTilt = 1.0    // how fast it really turns ÷ how fast it was asked
-        var sentAt = Date()
-        var sentLog: [(at: Date, pan: Double, tilt: Double)] = []
         var lastEye: (p: CGPoint, at: Date)?
         var imgVX = 0.0, imgVY = 0.0         // the person's motion in the picture, frames a second
         var moveX = 0.0, moveY = 0.0         // their real motion (right and up), frames a second
@@ -172,11 +176,29 @@ final class AutoTracker: ObservableObject {
         var ownLook: Double?, otherLook: Double?
         /// Since when they've been the only person around (then it's safe to learn their look).
         var aloneSince: Date?
-        /// Since when their landmarks have been hidden and only their outline shows.
-        var headAt: Date?
+        /// While only their outline shows, the outline last frame, to tell the body moving from arms reaching.
+        var outlineRef: CGRect?
+    }
+
+    /// Pan and tilt on their way to what tracking last asked for. Each picture sets a new speed
+    /// to aim for; twenty times a second the camera's speed eases toward it (see glide), so it
+    /// gathers speed and slows down smoothly instead of jumping to each new speed. Kept out of
+    /// `sessions`, which the screen watches, since it changes so often.
+    struct Motion {
+        /// Speeds asked for, in frames a second, right and up.
+        var wantX = 0.0, wantY = 0.0
+        var urgent = false, panning = false, tilting = false
+        /// Speeds now, and how fast they're changing.
+        var x = 0.0, y = 0.0, ax = 0.0, ay = 0.0
+        /// Pan and tilt last sent, in the camera's units (hundredths of a degree a second).
+        var sentPan = 0.0, sentTilt = 0.0
+        var sentLog: [(at: Date, pan: Double, tilt: Double)] = []
+        var at = Date()
     }
 
     @Published private(set) var sessions: [UUID: Session] = [:]
+    private var motion: [UUID: Motion] = [:]
+    private var ticks = 0
 
     private var feeds: [UUID: AnyCancellable] = [:]
     private var cameras: [UUID: PTZCamera] = [:]
@@ -232,9 +254,13 @@ final class AutoTracker: ObservableObject {
         if let done { waiters[camera.id, default: []].append(done) }
         pictures[camera.id] = picture
         picture.retain()
+        motion[camera.id] = Motion()
         feeds[camera.id] = picture.frames.sink { [weak self] img in self?.frame(img, camera.id) }
         if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
+            // Twenty times a second, in every run loop mode so it keeps going while a slider is dragged.
+            let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.tick() }
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
         }
     }
 
@@ -259,7 +285,7 @@ final class AutoTracker: ObservableObject {
         busy.remove(id)
         cameras[id] = nil
         pictures.removeValue(forKey: id)?.release()
-        if s.sentPan != 0 || s.sentTilt != 0 { ptz.trackDrive(pan: 0, tilt: 0, camera: id) }
+        if let m = motion.removeValue(forKey: id), m.sentPan != 0 || m.sentTilt != 0 { ptz.trackDrive(pan: 0, tilt: 0, camera: id) }
         if s.sentZoom != 0 { ptz.trackZoom(0, camera: id) }
         finish(id, "Tracking was stopped.")
         if sessions.isEmpty { timer?.invalidate(); timer = nil }
@@ -343,6 +369,12 @@ final class AutoTracker: ObservableObject {
             let core = CGRect(x: tMinX - pad, y: top, width: max(0.02, tMaxX - tMinX + pad * 2), height: max(0.02, tMaxY - top))
             var p = TrackedPerson(box: CGRect(x: minX, y: top, width: max(0.02, maxX - minX), height: max(0.02, maxY - top)),
                                   core: core, eye: eye, scale: scale)
+            // The body's middle, across. Only from a full pair: one shoulder or hip alone sits half a
+            // body off the middle, and swapping between one and both made the aim jump.
+            let lh = at(.leftHip), rh = at(.rightHip)
+            let mids: [CGFloat] = [ls.flatMap { l in rs.map { (l.x + $0.x) / 2 } }, lh.flatMap { l in rh.map { (l.x + $0.x) / 2 } } ?? at(.root)?.x]
+                .compactMap { $0 }
+            p.trunkX = mids.isEmpty ? at(.neck)?.x : mids.reduce(0, +) / CGFloat(mids.count)
             p.hipsInShot = at(.root) != nil || at(.leftHip) != nil || at(.rightHip) != nil
             p.anklesInShot = at(.leftAnkle) != nil || at(.rightAnkle) != nil
             // Facing: the nose sits off the line between the shoulders on the side they face.
@@ -391,7 +423,7 @@ final class AutoTracker: ObservableObject {
             }
             if let pick {
                 s.target = pick
-                s.eye = pick.eye
+                s.eye = CGPoint(x: pick.aimX, y: pick.eye.y)
                 s.scale = pick.scale
                 s.seen = pick.size
                 // Frame as asked; otherwise keep the shot the volunteer set up: its size class for
@@ -422,19 +454,26 @@ final class AutoTracker: ObservableObject {
         let choice = IdentityMatch.choose(candidates, reach: reach, gone: gone, model: .init(own: s.ownLook, others: s.otherLook))
         if case let .take(i, sure) = choice {
             var next = people[i]
-            // Arms up or across the body can hide the landmarks for a moment, leaving only an
-            // outline whose middle shifts with the arms. For that moment keep the head where it
-            // was last really seen; after it, follow the outline as before.
-            if next.outline, !last.outline || s.headAt != nil {
-                if s.headAt == nil { s.headAt = now }
-                if now.timeIntervalSince(s.headAt!) < 0.8 { next.eye = last.eye; next.core = last.core; next.outline = last.outline }
-            } else { s.headAt = nil }
+            // Arms up or across the body can hide the landmarks, leaving only an outline that
+            // grows and shifts with the arms. Then move only by what both sides of the outline do
+            // together: the whole body moving. One side reaching out is an arm, and moves nothing.
+            if next.outline {
+                let shift = s.outlineRef.map { Self.bodyShift(from: $0, to: next.box) } ?? .zero
+                s.outlineRef = next.box
+                let moved = last.core.offsetBy(dx: shift.x, dy: shift.y)
+                // Unless it's lost them altogether (the outline is somewhere else): then the outline.
+                if moved.intersects(next.box) {
+                    next.eye = CGPoint(x: last.eye.x + shift.x, y: last.eye.y + shift.y)
+                    next.trunkX = last.aimX + shift.x
+                    next.core = moved
+                }
+            } else { s.outlineRef = nil }
             learn(&s, next, candidates, i, sure: sure, reach: reach, gone: gone, now: now)
             s.target = next
             s.lastSeen = now
             s.phase = .following
             let o = s.eye ?? next.eye
-            s.eye = CGPoint(x: o.x + (next.eye.x - o.x) * 0.5, y: o.y + (next.eye.y - o.y) * 0.4)
+            s.eye = CGPoint(x: o.x + (next.aimX - o.x) * 0.5, y: o.y + (next.eye.y - o.y) * 0.4)
             if let n = next.scale { s.scale = s.scale.map { $0 + (n - $0) * 0.08 } ?? n }
             if let z = next.size { s.seen = z }
             steer(&s, next)
@@ -497,15 +536,16 @@ final class AutoTracker: ObservableObject {
         // How fast they're really moving: their motion in the picture plus the camera's own
         // motion at the time that picture was taken. In frames a second, right and up.
         let dtFrame = min(0.3, max(0.03, s.lastEye.map { now.timeIntervalSince($0.at) } ?? 0.07))
+        let here = CGPoint(x: person.aimX, y: person.eye.y)
         if let last = s.lastEye {
             let dt = now.timeIntervalSince(last.at)
             if dt > 0.02, dt < 0.6 {
-                let vx = (person.eye.x - last.p.x) / dt, vy = (person.eye.y - last.p.y) / dt
+                let vx = (here.x - last.p.x) / dt, vy = (here.y - last.p.y) / dt
                 s.imgVX += (vx - s.imgVX) * 0.35
                 s.imgVY += (vy - s.imgVY) * 0.35
             } else { s.imgVX = 0; s.imgVY = 0 }
         }
-        s.lastEye = (person.eye, now)
+        s.lastEye = (here, now)
         // How fast the person is really moving (frames a second, right and up): their drift in
         // the picture plus how fast the camera was really turning when that picture was taken,
         // measured from its position reads, never assumed from what it was told.
@@ -576,26 +616,24 @@ final class AutoTracker: ObservableObject {
         else if !tiltOn || (abs(ey) < size.deadY * 0.5 && !walkingY) { s.tilting = false }
         _ = (relX, relY)
 
-        // The camera speed to ask for, in frames a second: their own speed, plus a gentle pull
+        // The camera speed to aim for, in frames a second: their own speed, plus a gentle pull
         // toward the mark (stronger near the edge). Tested in simulation against a camera that
         // turns faster or slower than expected and a picture delay of 0.3 to 0.65 s: it keeps
-        // up with walking and settles without hunting. Every change of speed, starting, stopping
-        // or catching up, is eased (see easeRate), so the camera glides instead of lurching.
-        func rate(_ e: Double, _ move: Double, _ on: Bool, _ prev: Double) -> Double {
+        // up with walking and settles without hunting. The camera doesn't jump to it: the motion
+        // loop eases into it (see glide), so it gathers speed and slows down smoothly.
+        func rate(_ e: Double, _ move: Double, _ on: Bool) -> Double {
             let kp = min(2.5, min(1.6, (tune.correction ?? 1.2) * k) * (1 + 1.5 * urgency))
-            let want = on ? move + kp * e : 0
-            return Self.easeRate(from: prev, to: want, dt: dtFrame, urgent: urgency > 0.3, speed: k)
+            return on ? move + kp * e : 0
         }
-        let camNowX = s.sentPan / 100 * s.gainPan / fovX, camNowY = s.sentTilt / 100 * s.gainTilt / fovY
-        let rx = rate(ex, walkVX, s.panning, camNowX)
-        let ry = rate(ey, walkVY, s.tilting, camNowY)
+        let rx = rate(ex, walkVX, s.panning)
+        let ry = rate(ey, walkVY, s.tilting)
         let camX = camRX
-        // Back into the camera's units: degrees a second (× 100), allowing for how it really turns.
-        func units(_ r: Double, _ fov: Double, _ g: Double, _ correcting: Bool) -> Double {
-            Self.cameraSpeed(raw: r * fov * 100 / max(0.05, g), correcting: correcting)
-        }
-        let pan = units(rx, fovX, s.gainPan, s.panning)
-        let tilt = units(ry, fovY, s.gainTilt, s.tilting)
+        var m = motion[s.camera] ?? Motion()
+        m.wantX = rx; m.wantY = ry
+        m.urgent = urgency > 0.3
+        m.panning = s.panning; m.tilting = s.tilting
+        motion[s.camera] = m
+        let pan = m.sentPan, tilt = m.sentTilt
         TrackLog.shared.write(String(format: "%.3f,%@,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f,%.0f,%.0f,%.2f,%d,%.3f,%.3f,%d,%.2f,%.2f",
             now.timeIntervalSince1970, cameras[s.camera]?.name ?? "?", eye.x, ex, ey, s.imgVX, s.moveX, camX, rx,
             s.fov, s.gainPan, pan, tilt, urgency, s.panning ? 1 : 0, box.minX, box.maxX,
@@ -630,7 +668,7 @@ final class AutoTracker: ObservableObject {
         } else if s.zooming {
             s.zooming = false; s.zoomEnded = now
         }
-        send(&s, pan, tilt, zoom)
+        sendZoom(&s, zoom)
     }
 
     /// Where the lead room puts the mark, off the middle (negative: left of it, leaving room on
@@ -658,15 +696,24 @@ final class AutoTracker: ObservableObject {
         return dir > 0 ? max(0, faded) : min(0, faded)
     }
 
-    /// The next camera speed (frames a second) on the way from `prev` to `want`: at most
-    /// 1.5 frames a second more each second (3 near the edge of frame, or when slowing),
-    /// and only part of the way there each frame, so it eases into the new speed.
-    static func easeRate(from prev: Double, to want: Double, dt: Double, urgent: Bool, speed k: Double) -> Double {
-        let slowing = abs(want) < abs(prev) || want * prev < 0
-        let limit = (slowing || urgent ? 3.0 : 1.5) * max(1, k) * dt
-        // Slows a little more readily than it speeds up, so it doesn't coast past someone stopping.
-        let step = min(limit, max(abs(want - prev) * (slowing ? 0.5 : 0.35), 0.005))
-        return prev + max(-step, min(step, want - prev))
+    /// One step of the camera's speed `v` (frames a second) toward `want`, the way an operator
+    /// moves a fluid head: the push builds up gradually, so the camera gathers speed and then
+    /// eases into the new speed, and it lets off the same way as it arrives. `a` is how fast the
+    /// speed is changing now. `ramp` is about how long, in seconds, a change of speed takes.
+    /// Slowing down goes a little quicker than speeding up, so it doesn't coast past someone
+    /// stopping; near the edge of frame (`urgent`) it may push twice as hard.
+    static func glide(_ v: inout Double, _ a: inout Double, toward want: Double, dt: Double, ramp: Double,
+                      speed k: Double, urgent: Bool) {
+        let r = max(0.15, ramp)
+        let slowing = abs(want) < abs(v) || want * v < 0
+        let f = (slowing ? 1.6 : 1.0) * (urgent ? 2.0 : 1.0)
+        let tau = r / 3 / f                          // eases the last of the way in, without overshooting
+        let maxA = 1.2 / r * max(1, k) * f           // the hardest push, frames a second each second
+        let maxJerk = 2.5 / (r * r) * f                // how quickly the push itself can build or let off
+        let wantA = max(-maxA, min(maxA, (want - v) / tau))
+        a += max(-maxJerk * dt, min(maxJerk * dt, wantA - a))
+        let next = v + a * dt
+        if (want - v) * (want - next) < 0 { v = want; a = 0 } else { v = next }
     }
 
     /// A speed for the camera, in its units (hundredths of a degree a second; 20 is its
@@ -691,30 +738,67 @@ final class AutoTracker: ObservableObject {
         return min(1, max(0, (0.2 - Double(gap)) / 0.2))
     }
 
-    private func hold(_ s: inout Session) {
-        s.panning = false; s.tilting = false; s.zooming = false
-        send(&s, 0, 0, 0)
+    /// How far someone seen only by their outline really moved between two outlines: what both
+    /// sides did together. Walking moves both sides one way; an arm reaching out or going up moves
+    /// one side only, and that's no move at all. Walking while reaching counts the smaller.
+    static func bodyShift(from a: CGRect, to b: CGRect) -> CGPoint {
+        func together(_ d1: CGFloat, _ d2: CGFloat) -> CGFloat { d1 * d2 <= 0 ? 0 : (abs(d1) < abs(d2) ? d1 : d2) }
+        return CGPoint(x: together(b.minX - a.minX, b.maxX - a.maxX), y: together(b.minY - a.minY, b.maxY - a.maxY))
     }
 
-    private func send(_ s: inout Session, _ pan: Double, _ tilt: Double, _ zoom: Double) {
-        if pan != s.sentPan || tilt != s.sentTilt {
-            s.sentPan = pan; s.sentTilt = tilt
-            s.sentAt = Date()
-            s.sentLog.append((Date(), pan, tilt))
-            if s.sentLog.count > 40 { s.sentLog.removeFirst(s.sentLog.count - 40) }
-            ptz.trackDriveRaw(pan: Int(pan), tilt: Int(tilt), camera: s.camera)
+    /// Brings the camera to a stop (quickly, but still eased) and stops any zoom.
+    private func hold(_ s: inout Session) {
+        s.panning = false; s.tilting = false; s.zooming = false
+        if var m = motion[s.camera] {
+            m.wantX = 0; m.wantY = 0; m.urgent = true; m.panning = false; m.tilting = false
+            motion[s.camera] = m
         }
+        sendZoom(&s, 0)
+    }
+
+    private func sendZoom(_ s: inout Session, _ zoom: Double) {
         if zoom != s.sentZoom {
             s.sentZoom = zoom
             ptz.trackZoom(zoom, camera: s.camera)
         }
     }
 
-    /// Stops a camera whose picture has stopped coming in, so it never drifts on old frames.
+    /// Eases each tracking camera's pan and tilt toward what it was last asked for, and sends
+    /// the speed when it changes.
+    private func glideAll() {
+        let now = Date()
+        let ramp = config.trackTuning.ramp ?? 0.7, k = config.trackSpeed
+        for (id, var m) in motion {
+            guard let s = sessions[id] else { continue }
+            let dt = min(0.1, max(0.01, now.timeIntervalSince(m.at)))
+            m.at = now
+            Self.glide(&m.x, &m.ax, toward: m.wantX, dt: dt, ramp: ramp, speed: k, urgent: m.urgent)
+            Self.glide(&m.y, &m.ay, toward: m.wantY, dt: dt, ramp: ramp, speed: k, urgent: m.urgent)
+            // Into the camera's units: degrees a second (× 100), allowing for how it really turns.
+            let pan = Self.cameraSpeed(raw: m.x * s.fov * 100 / max(0.05, s.gainPan), correcting: m.panning)
+            let tilt = Self.cameraSpeed(raw: m.y * s.fov * 9 / 16 * 100 / max(0.05, s.gainTilt), correcting: m.tilting)
+            if pan != m.sentPan || tilt != m.sentTilt {
+                m.sentPan = pan; m.sentTilt = tilt
+                m.sentLog.append((now, pan, tilt))
+                if m.sentLog.count > 120 { m.sentLog.removeFirst(m.sentLog.count - 120) }
+                ptz.trackDriveRaw(pan: Int(pan), tilt: Int(tilt), camera: id)
+            }
+            motion[id] = m
+        }
+    }
+
+    /// Twenty times a second: the camera's motion. Four times a second: where the cameras
+    /// really are, and stopping a camera whose picture has stopped coming in, so it never
+    /// drifts on old frames.
     private func tick() {
+        glideAll()
+        ticks += 1
+        guard ticks % 5 == 0 else { return }
         let now = Date()
         for id in sessions.keys { poll(id) }
-        for (id, var s) in sessions where now.timeIntervalSince(s.lastFrame) > 0.6 && (s.sentPan != 0 || s.sentTilt != 0 || s.sentZoom != 0) {
+        for (id, var s) in sessions where now.timeIntervalSince(s.lastFrame) > 0.6 {
+            let m = motion[id]
+            guard s.sentZoom != 0 || (m.map { $0.wantX != 0 || $0.wantY != 0 } ?? false) else { continue }
             hold(&s)
             s.phase = .searching
             sessions[id] = s
@@ -747,7 +831,7 @@ final class AutoTracker: ObservableObject {
                         func asked(_ axis: (Double, Double) -> Double) -> Double {
                             let from = last.at.addingTimeInterval(-0.15), to = now.addingTimeInterval(-0.15)
                             var total = 0.0
-                            let log = s.sentLog
+                            let log = self.motion[id]?.sentLog ?? []
                             for (i, e) in log.enumerated() {
                                 let start = max(from, e.at)
                                 let end = min(to, i + 1 < log.count ? log[i + 1].at : to)

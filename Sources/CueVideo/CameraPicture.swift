@@ -127,7 +127,8 @@ private struct TrackedPicture: View {
                 if let image {
                     Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: .fit)
                 }
-                if let s = tracker.sessions[camera.id], let t = s.target?.box {
+                // Their head and body, what the camera follows: arms reaching out don't stretch it.
+                if let s = tracker.sessions[camera.id], let t = s.target?.core {
                     let r = CGRect(x: box.minX + t.minX * box.width, y: box.minY + t.minY * box.height,
                                    width: t.width * box.width, height: t.height * box.height)
                     let color = s.phase == .following ? T.accent : T.warning

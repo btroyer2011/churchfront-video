@@ -90,9 +90,12 @@ struct FramingRule: Codable, Hashable {
 /// correction: pull toward the framing mark (1.2); latency: how far behind the preview picture
 /// runs, in seconds (0.45); walkThreshold: how fast (frames a second) counts as walking (0.12);
 /// zoomThreshold: how wrong the size must look before zooming, as a log ratio (0.3, about a third);
-/// zoomWait: seconds it must stay wrong first (1.5).
+/// zoomWait: seconds it must stay wrong first (1.5); ramp: about how long, in seconds, the camera
+/// takes to gather speed or slow down, so it glides instead of snapping (0.7; higher is smoother
+/// but slower to react).
 struct TrackTuning: Codable, Hashable {
     var correction: Double?
+    var ramp: Double?
     var latency: Double?
     var walkThreshold: Double?
     var zoomThreshold: Double?

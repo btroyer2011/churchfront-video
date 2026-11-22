@@ -223,13 +223,56 @@ final class EdgeAlarmTests: XCTestCase {
         XCTAssertLessThanOrEqual(w, 0)
     }
 
-    /// Asked to go from slow to fast at once, the camera eases up over several frames.
-    func testSpeedUpsAreEased() {
-        var r = 0.1
-        r = AutoTracker.easeRate(from: r, to: 0.8, dt: 0.07, urgent: false, speed: 0.5)
-        XCTAssertLessThan(r, 0.25)
-        for _ in 0..<15 { r = AutoTracker.easeRate(from: r, to: 0.8, dt: 0.07, urgent: false, speed: 0.5) }
-        XCTAssertEqual(r, 0.8, accuracy: 0.05)
+    /// Asked to go from still to moving at once, the camera gathers speed: slowly at first,
+    /// then faster, then easing into the new speed without going past it.
+    func testStartsGatherSpeedAndEaseIn() {
+        var v = 0.0, a = 0.0, speeds: [Double] = []
+        for _ in 0..<30 {
+            AutoTracker.glide(&v, &a, toward: 0.25, dt: 0.05, ramp: 0.7, speed: 1, urgent: false)
+            speeds.append(v)
+        }
+        XCTAssertLessThan(speeds[0], 0.02, "the first moment is only a nudge")
+        XCTAssertGreaterThan(speeds[3] - speeds[2], speeds[0], "then it picks up")
+        XCTAssertLessThan(speeds[20] - speeds[19], speeds[3] - speeds[2], "and eases into the speed")
+        XCTAssertEqual(v, 0.25, accuracy: 0.01)
+        XCTAssertLessThanOrEqual(speeds.max()!, 0.25, "never past it")
+    }
+
+    /// Told to stop, it slows down smoothly, a little quicker than it started, and stops.
+    func testStopsEaseOut() {
+        var v = 0.25, a = 0.0, speeds: [Double] = []
+        for _ in 0..<30 {
+            AutoTracker.glide(&v, &a, toward: 0, dt: 0.05, ramp: 0.7, speed: 1, urgent: false)
+            speeds.append(v)
+        }
+        XCTAssertGreaterThan(speeds[0], 0.2, "no sudden stop")
+        XCTAssertLessThan(speeds[12], 0.01, "stopped within about half a second")
+        XCTAssertGreaterThanOrEqual(speeds.min()!, 0, "never backs up")
+    }
+
+    /// Near the edge of frame it may push harder, so it catches someone before they're cut off.
+    func testUrgentGathersSpeedSooner() {
+        var calm = 0.0, ca = 0.0, hurry = 0.0, ha = 0.0
+        for _ in 0..<6 {
+            AutoTracker.glide(&calm, &ca, toward: 0.5, dt: 0.05, ramp: 0.7, speed: 1, urgent: false)
+            AutoTracker.glide(&hurry, &ha, toward: 0.5, dt: 0.05, ramp: 0.7, speed: 1, urgent: true)
+        }
+        XCTAssertGreaterThan(hurry, calm * 1.5)
+    }
+
+    /// Seen only by their outline, an arm going out to one side widens the outline but doesn't
+    /// move them; walking moves both sides, and counts.
+    func testAnOutlineWideningIsNotAMove() {
+        let standing = CGRect(x: 0.40, y: 0.20, width: 0.20, height: 0.50)
+        let armOut = CGRect(x: 0.40, y: 0.20, width: 0.35, height: 0.50)
+        let armsUp = CGRect(x: 0.36, y: 0.05, width: 0.28, height: 0.65)
+        XCTAssertEqual(AutoTracker.bodyShift(from: standing, to: armOut), .zero)
+        XCTAssertEqual(AutoTracker.bodyShift(from: standing, to: armsUp), .zero)
+        let walked = standing.offsetBy(dx: 0.05, dy: 0)
+        XCTAssertEqual(AutoTracker.bodyShift(from: standing, to: walked).x, 0.05, accuracy: 1e-9)
+        // Walking right while an arm goes out to the right: only the walk.
+        let walkedReaching = CGRect(x: 0.45, y: 0.20, width: 0.30, height: 0.50)
+        XCTAssertEqual(AutoTracker.bodyShift(from: standing, to: walkedReaching).x, 0.05, accuracy: 1e-9)
     }
 
     /// Zoomed in tight, a small correction still moves the camera at its slowest speed;
