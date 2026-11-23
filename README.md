@@ -31,6 +31,15 @@ executable is still `CueVideo` and the bundle ID is still `com.churchfront.cuevi
 the Swift package, targets and folders keep their CueVideo names, so existing setups,
 permissions and scripts keep working.
 
+A release build runs on any Mac on macOS 14 or later, Apple silicon or Intel (it needs Xcode
+installed to build that way), and is zipped as `Churchfront Video.zip`. To run it on another
+Mac, copy the zip over, unzip it and drag the app to Applications. It isn't notarized, so the
+first time macOS says it can't check it: in System Settings > Privacy & Security, choose Open
+Anyway (once). Then copy over the setup file (below) or set it up in the app. The Canon
+admin login (only for changing presets stored on the cameras) is kept in the keychain, so
+it's entered again on each Mac. NDI previews need
+NDI Tools installed on that Mac too.
+
 ## Setup file
 
 Everything set up in the app is saved as plain JSON in

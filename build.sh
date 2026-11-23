@@ -1,11 +1,21 @@
 #!/bin/zsh
 # Builds "Churchfront Video.app" (release) next to this script.
 # The executable inside, the bundle ID and the MCP binary keep their CueVideo names on purpose.
+# A release build runs on any Mac on macOS 14 or later, Apple silicon or Intel, and is zipped
+# as "Churchfront Video.zip" to copy to another Mac. A debug build is for this Mac only.
 set -e
 cd "$(dirname "$0")"
 MODE=${1:-release}
-swift build -c $MODE
-BIN="$(swift build -c $MODE --show-bin-path)/CueVideo"
+ARCHS=()
+if [ "$MODE" = release ]; then
+    # Building for both kinds of Mac needs Xcode's build system, not just the command line tools.
+    if [ -z "$DEVELOPER_DIR" ] && [ -d /Applications/Xcode.app ]; then
+        export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+    fi
+    ARCHS=(--arch arm64 --arch x86_64)
+fi
+swift build -c $MODE $ARCHS
+BIN="$(swift build -c $MODE $ARCHS --show-bin-path)/CueVideo"
 APP="Churchfront Video.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -39,3 +49,9 @@ codesign --force --deep --sign - "$APP"
 touch "$APP"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
 echo "Built $(pwd)/$APP"
+if [ "$MODE" = release ]; then
+    # ditto keeps the signature intact, which a plain zip can break.
+    rm -f "Churchfront Video.zip"
+    ditto -c -k --keepParent "$APP" "Churchfront Video.zip"
+    echo "Zipped $(pwd)/Churchfront Video.zip"
+fi
