@@ -260,6 +260,28 @@ final class EdgeAlarmTests: XCTestCase {
         XCTAssertGreaterThan(hurry, calm * 1.5)
     }
 
+    /// Standing in the still zone, they're left alone even when they seem to be walking; leaving
+    /// it starts the camera, which follows a walk and settles back near the middle.
+    func testStillZoneInTheMiddle() {
+        let zone = 0.13
+        XCTAssertFalse(AutoTracker.shouldMove(false, off: 0.10, zone: zone, walking: true, outrunning: false, edge: 0),
+                       "a walk that's only the camera's own move doesn't start it")
+        XCTAssertTrue(AutoTracker.shouldMove(false, off: -0.14, zone: zone, walking: false, outrunning: false, edge: 0))
+        XCTAssertTrue(AutoTracker.shouldMove(false, off: 0.05, zone: zone, walking: false, outrunning: false, edge: 0.2),
+                      "near the edge it moves anyway")
+        XCTAssertTrue(AutoTracker.shouldMove(true, off: 0.10, zone: zone, walking: false, outrunning: false, edge: 0),
+                      "once moving, it brings them back nearer the middle")
+        XCTAssertTrue(AutoTracker.shouldMove(true, off: 0.02, zone: zone, walking: true, outrunning: false, edge: 0),
+                      "it keeps following a walk")
+        XCTAssertFalse(AutoTracker.shouldMove(true, off: 0.02, zone: zone, walking: true, outrunning: true, edge: 0),
+                       "but not when the camera is outrunning them")
+        XCTAssertFalse(AutoTracker.shouldMove(true, off: 0.05, zone: zone, walking: false, outrunning: false, edge: 0))
+        // Tilt the same, with the shot's smaller zone up and down: a nod doesn't tilt it.
+        let zoneY = ShotSize.waist.standard.deadY ?? 0
+        XCTAssertFalse(AutoTracker.shouldMove(false, off: -0.06, zone: zoneY, walking: true, outrunning: false, edge: 0))
+        XCTAssertTrue(AutoTracker.shouldMove(false, off: -0.09, zone: zoneY, walking: false, outrunning: false, edge: 0))
+    }
+
     /// Seen only by their outline, an arm going out to one side widens the outline but doesn't
     /// move them; walking moves both sides, and counts.
     func testAnOutlineWideningIsNotAMove() {

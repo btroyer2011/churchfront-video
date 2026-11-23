@@ -38,9 +38,10 @@ enum ShotSize: String, CaseIterable, Identifiable {
     /// while CueVideo runs (Setup, the config file, or Claude's set_framing).
     var standard: FramingRule {
         switch self {
-        case .shoulders: return FramingRule(eyeLine: 0.29, scale: 0.36, leadRoom: 0.09, deadX: 0.08, deadY: 0.05)
-        case .waist: return FramingRule(eyeLine: 0.29, scale: 0.21, leadRoom: 0.11, deadX: 0.07, deadY: 0.05)
-        case .full: return FramingRule(eyeLine: 0.12, scale: 0.097, leadRoom: 0.13, deadX: 0.06, deadY: 0.04)
+        case .shoulders: return FramingRule(eyeLine: 0.29, scale: 0.36, leadRoom: 0.09, deadX: 0.12, deadY: 0.08)
+        case .waist: return FramingRule(eyeLine: 0.29, scale: 0.21, leadRoom: 0.11, deadX: 0.13, deadY: 0.08)
+        // Less room up and down: the eyes sit near the top, and more would risk the top of their head.
+        case .full: return FramingRule(eyeLine: 0.12, scale: 0.097, leadRoom: 0.13, deadX: 0.15, deadY: 0.06)
         }
     }
     /// The rule in use now: the standard with any changes from the setup file.
@@ -53,7 +54,7 @@ enum ShotSize: String, CaseIterable, Identifiable {
     /// How far off center a person facing or walking one way sits, giving lead room.
     var leadRoom: Double { rule.leadRoom ?? 0.1 }
     /// How far they can drift across or up and down before the camera moves.
-    var deadX: Double { rule.deadX ?? 0.07 }
+    var deadX: Double { rule.deadX ?? 0.13 }
     var deadY: Double { rule.deadY ?? 0.08 }
 
     /// The size a framing is closest to, from its head scale and what's in shot.
@@ -608,12 +609,14 @@ final class AutoTracker: ObservableObject {
         let box = person.core
         let urgency = Self.edgeUrgency(core: box, eyeX: eye.x, right: ex > 0)
 
-        // Move while they're off the mark or walking; settle once they stand still on it.
-        if abs(ex) > size.deadX || walkingX || urgency > 0 { s.panning = true }
-        else if abs(ex) < size.deadX * 0.5 && !walkingX { s.panning = false }
-        let tiltOn = config.trackTilt
-        if tiltOn, abs(ey) > size.deadY || walkingY { s.tilting = true }
-        else if !tiltOn || (abs(ey) < size.deadY * 0.5 && !walkingY) { s.tilting = false }
+        // A still zone around the mark (see shouldMove): the camera only moves once they leave it.
+        // The camera outrunning them: they slide back in the picture, against their walk (the
+        // picture's y runs down, their walk's up).
+        let outrunX = s.walkW * s.imgVX < 0 && abs(s.imgVX) > walkMin
+        let outrunY = s.walkWY * s.imgVY > 0 && abs(s.imgVY) > walkMin * 1.25
+        s.panning = Self.shouldMove(s.panning, off: ex, zone: size.deadX, walking: walkingX, outrunning: outrunX, edge: urgency)
+        s.tilting = config.trackTilt
+            && Self.shouldMove(s.tilting, off: ey, zone: size.deadY, walking: walkingY, outrunning: outrunY, edge: 0)
         _ = (relX, relY)
 
         // The camera speed to aim for, in frames a second: their own speed, plus a gentle pull
@@ -677,6 +680,18 @@ final class AutoTracker: ObservableObject {
     static func leadTarget(walkVX: Double, facing: Int, leadRoom: Double) -> Double {
         if walkVX != 0 { return walkVX > 0 ? -leadRoom : leadRoom }
         return Double(-facing) * leadRoom * 0.35
+    }
+
+    /// Whether the camera should be panning (or tilting). Someone `off` the mark by less than
+    /// `zone` (a share of the frame) is left alone, even if they seem to be moving: the camera's
+    /// own moves can look like walking, and letting that start it set the shot swinging back and
+    /// forth around someone standing still. Leaving the zone, or nearing the edge, starts it. Then
+    /// it follows a walk, and settles once they're back near the mark and not walking, or the
+    /// camera is outrunning them (which is how a walk that wasn't really one shows).
+    static func shouldMove(_ on: Bool, off e: Double, zone: Double, walking: Bool, outrunning: Bool, edge: Double) -> Bool {
+        if abs(e) > zone || edge > 0 { return true }
+        guard on else { return false }
+        return !(abs(e) < zone * 0.5 && (!walking || outrunning))
     }
 
     /// Which way someone's whole body is turned: their head's way, when their shoulders show
